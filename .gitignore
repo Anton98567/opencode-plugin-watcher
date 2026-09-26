@@ -1,0 +1,22 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# runtime data
+data/
+outbox/
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+
+# os / editors
+.DS_Store
+.idea/
+.vscode/
+*.swp

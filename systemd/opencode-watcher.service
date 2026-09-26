@@ -1,0 +1,29 @@
+[Unit]
+Description=OpenCode Plugin Watcher — дайджест плагинов в Telegram
+Documentation=https://github.com/Anton98567/opencode-plugin-watcher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/opencode-plugin-watcher
+ExecStart=/usr/bin/python3 /opt/opencode-plugin-watcher/watcher.py run
+User=opencode-watcher
+Group=opencode-watcher
+
+# Стандартный вывод идёт в journalctl: journalctl -u opencode-watcher.service
+StandardOutput=journal
+StandardError=journal
+
+# Минимальные права: сеть и запись только в каталог проекта
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+ReadWritePaths=/opt/opencode-plugin-watcher
+
+[Install]
+WantedBy=multi-user.target

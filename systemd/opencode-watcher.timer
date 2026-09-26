@@ -1,0 +1,18 @@
+[Unit]
+Description=Запуск OpenCode Plugin Watcher по расписанию
+Documentation=https://github.com/Anton98567/opencode-plugin-watcher
+
+[Timer]
+# Время указано в UTC: 07:00 UTC = 10:00 МСК.
+# Другие режимы: daily, hourly — см. ./install.sh или OnCalendar ниже.
+OnCalendar=Sun *-*-* 07:00:00 UTC
+
+# Случайная задержка до 15 минут: запросы к GitHub не придут ровно в полную минуту
+# и не словят rate limit.
+RandomizedDelaySec=900
+
+# Если сервер был выключен в момент запуска — сработает при следующем включении.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

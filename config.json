@@ -1,0 +1,41 @@
+{
+  "digest_title": "🆕 OpenCode Watcher",
+  "github_window_days": 30,
+  "github_queries": [
+    "opencode plugin in:name,description created:>={since}",
+    "topic:opencode-plugin pushed:>={since}",
+    "opencode-plugin in:name pushed:>={since}",
+    "awesome-opencode in:name"
+  ],
+  "npm_queries": [
+    "opencode-plugin",
+    "keywords:opencode-plugin",
+    "opencode tui plugin",
+    "opencode hooks plugin"
+  ],
+  "filters": {
+    "min_stars": 0,
+    "star_jump": 10,
+    "window_days": 8,
+    "npm_max_age_days": 45,
+    "max_new": 40
+  },
+  "translate": {
+    "enabled": true,
+    "lang": "ru",
+    "max_chars": 150,
+    "providers": ["pollinations", "mymemory", "google"],
+    "model": "openai/gpt-5.4-nano",
+    "endpoint": "https://gen.pollinations.ai/v1/chat/completions",
+    "batch": 12,
+    "timeout": 90,
+    "delay": 0.35,
+    "mymemory_email": ""
+  },
+  "sources": {
+    "github": true,
+    "npm": true,
+    "ecosystem": true,
+    "awesome": true
+  }
+}
