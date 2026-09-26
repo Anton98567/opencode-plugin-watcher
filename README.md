@@ -1,9 +1,12 @@
 # OpenCode Plugin Watcher
 
-Еженедельный (или ежедневный) дайджест новых и обновлённых **плагинов для
-[OpenCode](https://opencode.ai)** в Telegram. Находит плагины в GitHub и npm,
-следит за версиями и звёздами, переводит описания на русский и отмечает, что уже
-показывал, чтобы не присылать одно и то же повторно.
+Еженедельный (или ежедневный) дайджест новых и обновлённых **плагинов и
+MCP-серверов для [OpenCode](https://opencode.ai)** в Telegram. Находит плагины в
+GitHub и npm, следит за версиями и звёздами, переводит описания на русский и
+отмечает, что уже показывал, чтобы не присылать одно и то же повторно.
+
+Одна команда отправляет два сообщения: сначала плагины, потом MCP. Оба — по
+популярности.
 
 Ноль зависимостей: только стандартная библиотека Python 3.9+.
 
@@ -59,7 +62,7 @@
   хэшу описания.
 * **Склейка длинных сообщений.** Дайджест длиннее 3900 символов режется на части по
   границам блоков и отправляется несколькими сообщениями.
-* **Outbox.** Каждый дайджест дублируется в `outbox/ГГГГ-ММ-ДД_ЧЧММ.md` — можно
+* **Outbox.** Каждый дайджест дублируется в `outbox/ГГГГ-ММ-ДД_ЧЧММ_plugins.md` и `..._mcp.md` — можно
   перечитать, не спрашивая Telegram.
 * **Живой приём заявок.** `chat-id` умеет читать `getUpdates`: можно написать боту
   `/start` или дайджест ещё не уйдёт, пока вы его не подтвердите.
@@ -208,8 +211,16 @@ public-репозиториев) — генерируется на
 {
   "digest_title": "🆕 OpenCode Watcher",
   "github_window_days": 30,
-  "github_queries": ["opencode plugin in:name,description created:>={since}", "..."],
-  "npm_queries": ["opencode-plugin", "keywords:opencode-plugin", "..."],
+  "github_queries": [
+    "opencode plugin in:name,description created:>={since}",
+    "topic:opencode-plugin pushed:>={since}",
+    "…"
+  ],
+  "npm_queries": [
+    "opencode-plugin",
+    "keywords:opencode-plugin",
+    "…"
+  ],
   "filters": {
     "min_stars": 0,
     "star_jump": 10,
@@ -221,13 +232,45 @@ public-репозиториев) — генерируется на
     "enabled": true,
     "lang": "ru",
     "max_chars": 150,
-    "providers": ["pollinations", "mymemory", "google"],
+    "providers": [
+      "pollinations",
+      "mymemory",
+      "google"
+    ],
     "model": "openai/gpt-5.4-nano",
     "endpoint": "https://gen.pollinations.ai/v1/chat/completions",
     "batch": 12,
+    "timeout": 90,
+    "delay": 0.35,
     "mymemory_email": ""
   },
-  "sources": { "github": true, "npm": true, "ecosystem": true, "awesome": true }
+  "sources": {
+    "github": true,
+    "npm": true,
+    "ecosystem": true,
+    "awesome": true
+  },
+  "mcp": {
+    "enabled": true,
+    "digest_title": "🔌 OpenCode MCP",
+    "github_queries": [
+      "opencode-mcp in:name pushed:>={since}",
+      "topic:opencode-mcp pushed:>={since}",
+      "…"
+    ],
+    "npm_queries": [
+      "opencode-mcp",
+      "keywords:opencode-mcp",
+      "…"
+    ],
+    "filters": {
+      "min_stars": 0,
+      "star_jump": 5,
+      "window_days": 8,
+      "npm_max_age_days": 90,
+      "max_new": 30
+    }
+  }
 }
 ```
 
@@ -257,12 +300,12 @@ public-репозиториев) — генерируется на
 | `mcp.digest_title` | заголовок второго сообщения |
 | `mcp.github_queries` | 3 запроса к GitHub Search по `opencode-mcp` |
 | `mcp.npm_queries` | запросы к реестру npm |
-| `mcp.filters.*` | свои `min_stars`, `star_jump`, `window_days`, `npm_max_age_days`, `max_new` |
+| `mcp.filters.*` | свои `0`, `5`, `8`, `90`, `30` — по умолчанию как в таблице выше, кроме `npm_max_age_days` (90) и `star_jump` (5) |
 
 ### Как отбираются MCP-серверы
 
 Точность важнее полноты: без жёсткого фильтра в выдачу попадают шлюзы и
-мультиагентные платности на тысячи звёзд, которые просто *поддерживают* OpenCode
+агентные плагины на тысячи звёзд, которые просто *поддерживают* OpenCode
 среди других клиентов. Запись проходит, если:
 
 * **сильный признак** — `opencode` и `mcp` слитно в имени репозитория, npm-имени
@@ -278,8 +321,9 @@ MCP-серверы пишутся в ту же таблицу `items`, но с `
 не пересекаются. Сниппет «⚙️ Установка в opencode.json» в MCP-дайджест не
 выводится: для MCP нужен `type`/`url`, а не имя пакета.
 
-Первый запуск покажет все найденные MCP-серверы разом; дальше — только новые.
-Ограничить размер: `mcp.filters.max_new`.
+Первый запуск — самый объёмный: показывает всё, что накопилось, но не больше
+`mcp.filters.max_new` (по умолчанию 30). Остальное дойдёт следующими дайджестами,
+потому что отправленные отмечаются в базе. Дальше — только новое.
 
 ## Перевод описаний
 
@@ -327,7 +371,7 @@ sudo systemctl edit opencode-watcher.timer   # переопределить OnCa
 ## Как это работает
 
 ```
-источники ──► нормализация ──► склейка в таблицу plugins
+источники ──► нормализация ──► склейка в таблицу items
                                       │
                     БД (SQLite): last_seen, stars, versions, announced
                                       │
@@ -338,7 +382,7 @@ sudo systemctl edit opencode-watcher.timer   # переопределить OnCa
                           Telegram  +  outbox/*.md
 ```
 
-* `plugins` — одна строка на плагин, ключ склейки: `name+owner` для GitHub,
+* `items` — одна строка на находку (плагин или MCP), ключ склейки: `name+owner` для GitHub,
   `name` для npm, `name+repo` для ecosystem/awesome. Репозиторий и npm-пакет
   одного проекта объединяются по совпадению имени.
 * `versions` — история версий, чтобы ловить апдейты.
@@ -412,7 +456,7 @@ outbox/                            копии дайджестов в markdown
 
 ```bash
 python3 -m py_compile watcher.py        # проверка синтаксиса
-python3 tests/selftest.py               # 37 тестов чистых функций, без сети
+python3 tests/selftest.py               # 51 тест чистых функций, без сети
 python3 watcher.py --help               # список команд
 python3 watcher.py run --dry-run        # прогон без отправки и без сканирования
 ```
@@ -420,7 +464,10 @@ python3 watcher.py run --dry-run        # прогон без отправки �
 `tests/selftest.py` проверяет то, что обычно ломается тихо: очистку текста,
 экранирование для Telegram, разбиение длинных сообщений без потери содержимого,
 конвертацию HTML в markdown, разбор JSON-ответа переводчика, склейку npm-пакета с
-репозиторием и работу со схемой SQLite.
+репозиторием и работу со схемой SQLite. Отдельно проверяется то, что ломается
+тихо: плагины и MCP не попадают в чужой дайджест, сортировка идёт по звёздам,
+а правила отбора MCP пропускают серверы и отсекают крупные проекты, которые
+просто поддерживают OpenCode среди других клиентов.
 
 В репозитории есть CI (`.github/workflows/ci.yml`): на Python 3.9, 3.11 и 3.12
 прогоняются компиляция, `--help`, самотесты и `bash -n install.sh`.
