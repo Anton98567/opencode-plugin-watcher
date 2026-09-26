@@ -51,6 +51,20 @@ AWESOME_URL = "https://raw.githubusercontent.com/awesome-opencode/awesome-openco
 REPO_RE = re.compile(r"github\.com[:/]+([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)")
 OPENCODE_RE = re.compile(r"(?i)open[\s_-]?code")
 V2_RE = re.compile(r"(?i)(opencode\s*v?2|\bv2\b|version\s*2|REL1_41|rel_?41)")
+MCP_RE = re.compile(r"(?i)(mcp|model[\s_-]?context[\s_-]?protocol)")
+# «mcp» и «opencode» слитно в имени или топиках — сильный сигнал: opencode-mcp,
+# @scope/opencode-mcp, topic:opencode-mcp. Проверяем только имя и топики, не описание.
+MCP_KEY_RE = re.compile(r"(?i)(open[\s_-]?code[\s_.+-]{0,3}mcp|mcp[\s_.+-]{0,3}open[\s_-]?code)")
+# Осмысленный сигнал в описании: сервер именно для OpenCode.
+# Только явные формулировки назначения — простое «где-то рядом opencode и mcp»
+# пропускало в дайджест шлюзы и SDK на тысячи звёзд.
+MCP_DESC_RE = re.compile(
+    r"(?i)(mcp\s+server[^\n]{0,30}\bfor\s+open[\s_-]?code"
+    r"|open[\s_-]?code[^\n]{0,10}\bmcp\s+server"
+    r"|mcp\s+server\s+(?:de\s+|para\s+)?open[\s_-]?code"
+    r"|mcp\s+server[^\n]{0,20}\b(for|to|that|which|pour|para|fur)\b[^\n]{0,12}open[\s_-]?code"
+    r"|mcp\s+(?:for|de\s+|para\s+|pour\s+|für\s+)?open[\s_-]?code)"
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -473,25 +487,32 @@ def translate_rows(conn: sqlite3.Connection, rows, cfg: dict) -> dict[str, str]:
 # --------------------------------------------------------------------------- #
 # источники
 # --------------------------------------------------------------------------- #
-def source_github(cfg: dict, since: datetime) -> list[dict]:
-    """Поиск репозиториев через GitHub Search API."""
+def source_github(cfg: dict, since: datetime, mode: str = "plugin") -> list[dict]:
+    """Поиск репозиториев через GitHub Search API.
+
+    mode="plugin" — плагины OpenCode, mode="mcp" — MCP-серверы под OpenCode.
+    """
     token = os.environ.get("GITHUB_TOKEN", "").strip()
     headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
     since_str = since.strftime("%Y-%m-%d")
-    min_stars = int(cfg.get("filters", {}).get("min_stars", 0))
+    kind = "mcp" if mode == "mcp" else "plugin"
+    filters = cfg.get("mcp", {}).get("filters", {}) if mode == "mcp" else cfg.get("filters", {})
+    min_stars = int(filters.get("min_stars", 0))
+    queries = cfg.get("mcp", {}).get("github_queries") if mode == "mcp" else cfg.get("github_queries")
+    queries = queries or cfg.get("github_queries", [])
     items: list[dict] = []
     seen_repos: set[str] = set()
 
-    for template in cfg.get("github_queries", []):
+    for template in queries:
         query = template.format(since=since_str, since7=(now_utc() - timedelta(days=7)).strftime("%Y-%m-%d"))
         url = (
             f"{GH_API}/search/repositories?"
             + urllib.parse.urlencode({"q": query, "sort": "updated", "order": "desc", "per_page": 100})
         )
-        log(f"GitHub: {query}")
+        log(f"GitHub/{mode}: {query}")
         try:
             data = http_get_json(url, headers=headers)
         except Exception as exc:  # noqa: BLE001
@@ -505,11 +526,20 @@ def source_github(cfg: dict, since: datetime) -> list[dict]:
                 continue
             topics = [t.lower() for t in (raw.get("topics") or [])]
             desc = raw.get("description") or ""
-            relevant = (
-                any(t in ("opencode", "opencode-plugin") for t in topics)
-                or OPENCODE_RE.search(repo.replace("/", "-"))
-                or re.search(r"(?i)opencode[-_ ]?(plugin|extension|toolkit|integration)", desc)
-            )
+            if mode == "mcp":
+                # MCP именно под OpenCode: слитно в имени/топиках ИЛИ
+                # «mcp server … for opencode» в описании. Одного упоминания
+                # OpenCode в списке поддерживаемых клиентов недостаточно —
+                # иначе в дайджест попадают шлюзы на 70k звёзд.
+                key_hit = bool(MCP_KEY_RE.search(f"{repo} {' '.join(topics)}"))
+                desc_hit = bool(MCP_DESC_RE.search(desc))
+                relevant = key_hit or desc_hit
+            else:
+                relevant = (
+                    any(t in ("opencode", "opencode-plugin") for t in topics)
+                    or OPENCODE_RE.search(repo.replace("/", "-"))
+                    or re.search(r"(?i)opencode[-_ ]?(plugin|extension|toolkit|integration)", desc)
+                )
             if not relevant:
                 continue
             stars = int(raw.get("stargazers_count") or 0)
@@ -520,15 +550,15 @@ def source_github(cfg: dict, since: datetime) -> list[dict]:
                 {
                     "key": f"gh:{repo}",
                     "title": raw.get("name") or repo.split("/")[-1],
-                    "kind": "plugin",
+                    "kind": kind,
                     "repo": repo,
                     "url": raw.get("html_url"),
                     "description": clean_text(desc),
                     "stars": stars,
                     "pushed": raw.get("pushed_at"),
                     "topics": ",".join(topics[:8]),
-                    "v2": 1 if (V2_RE.search(desc) or "opencode-v2" in topics or "v2" in topics) else 0,
-                    "sources": "github",
+                    "v2": 0 if mode == "mcp" else (1 if (V2_RE.search(desc) or "opencode-v2" in topics or "v2" in topics) else 0),
+                    "sources": f"github:{mode}" if mode == "mcp" else "github",
                 }
             )
     return items
@@ -557,17 +587,21 @@ def fetch_npm_meta(name: str) -> dict:
     }
 
 
-def source_npm(cfg: dict) -> list[dict]:
+def source_npm(cfg: dict, mode: str = "plugin") -> list[dict]:
     """Поиск npm-пакетов. Релевантность фильтруем сами: search отдаёт мусор."""
-    min_stars = int(cfg.get("filters", {}).get("min_stars", 0))
-    max_age = int(cfg.get("filters", {}).get("npm_max_age_days", 45))
+    kind = "mcp" if mode == "mcp" else "plugin"
+    filters = cfg.get("mcp", {}).get("filters", {}) if mode == "mcp" else cfg.get("filters", {})
+    min_stars = int(filters.get("min_stars", 0))
+    max_age = int(filters.get("npm_max_age_days", 45))
+    queries = cfg.get("mcp", {}).get("npm_queries") if mode == "mcp" else cfg.get("npm_queries")
+    queries = queries or ["opencode-plugin", "keywords:opencode-plugin", "opencode tui plugin"]
     cutoff = now_utc() - timedelta(days=max_age)
     items: list[dict] = []
     seen: set[str] = set()
 
-    for text in cfg.get("npm_queries", ["opencode-plugin", "keywords:opencode-plugin", "opencode tui plugin"]):
+    for text in queries:
         url = NPM_SEARCH + "?" + urllib.parse.urlencode({"text": text, "size": 50})
-        log(f"npm: {text}")
+        log(f"npm/{mode}: {text}")
         try:
             data = http_get_json(url)
         except Exception as exc:  # noqa: BLE001
@@ -582,6 +616,11 @@ def source_npm(cfg: dict) -> list[dict]:
             haystack = f"{name} {keywords} {pkg.get('description') or ''}"
             if not OPENCODE_RE.search(haystack):
                 continue
+            if mode == "mcp":
+                key_hit = bool(MCP_KEY_RE.search(f"{name} {keywords}"))
+                desc_hit = bool(MCP_DESC_RE.search(pkg.get("description") or ""))
+                if not (key_hit or desc_hit):
+                    continue
             published = parse_date(pkg.get("date"))
             if published and published < cutoff:
                 continue
@@ -591,7 +630,7 @@ def source_npm(cfg: dict) -> list[dict]:
             item = {
                 "key": f"npm:{name}",
                 "title": name,
-                "kind": "plugin",
+                "kind": kind,
                 "npm": name,
                 "repo": repo,
                 "url": links.get("npm") or f"https://www.npmjs.com/package/{name}",
@@ -600,8 +639,8 @@ def source_npm(cfg: dict) -> list[dict]:
                 "version": pkg.get("version") or "",
                 "published": pkg.get("date") or "",
                 "topics": keywords[:200],
-                "v2": 1 if V2_RE.search(haystack) else 0,
-                "sources": "npm",
+                "v2": 0 if mode == "mcp" else (1 if V2_RE.search(haystack) else 0),
+                "sources": f"npm:{mode}" if mode == "mcp" else "npm",
             }
             items.append(item)
 
@@ -795,9 +834,13 @@ def merge_items(raw: list[dict]) -> list[dict]:
             # репозиторий/запись из курируемого списка присоединяется к npm-пакету
             for name in item_names(item):
                 twin = by_name.get(name)
-                if twin is not None and twin.get("npm") and twin["key"] != key:
-                    key = twin["key"]
-                    break
+                if twin is None or twin["key"] == key or not twin.get("npm"):
+                    continue
+                # MCP-сервер и плагин — разные сущности, даже если имена совпали
+                if (twin.get("kind") or "plugin") != (item.get("kind") or "plugin"):
+                    continue
+                key = twin["key"]
+                break
         if key in merged:
             target = merged[key]
             for field in ("description", "url", "published", "pushed", "version", "topics", "npm", "repo"):
@@ -901,61 +944,74 @@ def store_items(conn: sqlite3.Connection, items: list[dict]) -> tuple[int, int]:
 # сборка дайджеста
 # --------------------------------------------------------------------------- #
 def build_digest(
-    conn: sqlite3.Connection, cfg: dict, demo: bool = False, do_translate: bool = True
+    conn: sqlite3.Connection,
+    cfg: dict,
+    demo: bool = False,
+    do_translate: bool = True,
+    section: str = "plugins",
 ) -> tuple[str, list[str]]:
     """Формирует HTML-дайджест. Возвращает (текст, ключи отправленных элементов).
 
+    section="plugins" — плагины (kind != 'mcp'), section="mcp" — MCP-серверы.
     demo=True — показать последние находки независимо от отметок «отправлено»
     и не помечать их (для проверки рендера в Telegram).
     """
-    filters = cfg.get("filters", {})
+    is_mcp = section == "mcp"
+    scfg = cfg.get("mcp", {}) if is_mcp else cfg
+    filters = scfg.get("filters", {})
     min_stars = int(filters.get("min_stars", 0))
+    # разделяем две сущности: kind IS NULL у старых записей без явного kind
+    kind_sql = "kind = 'mcp'" if is_mcp else "(kind IS NULL OR kind != 'mcp')"
+    # сортировка по популярности: звёзды убывающе, при равных — свежее,
+    # npm-записи без звёзд уходят в конец
+    popularity = "stars DESC, first_seen DESC"
     since_first = iso(now_utc() - timedelta(days=int(filters.get("window_days", 8))))
     last_digest = meta_get(conn, "last_digest_at") or since_first
 
     if demo:
         fresh = conn.execute(
-            """SELECT * FROM items WHERE (stars >= ? OR npm IS NOT NULL)
-               ORDER BY first_seen DESC, stars DESC LIMIT 25""",
+            f"""SELECT * FROM items WHERE {kind_sql} AND (stars >= ? OR npm IS NOT NULL)
+               ORDER BY {popularity} LIMIT 25""",
             (min_stars,),
         ).fetchall()
     else:
         fresh = conn.execute(
-            """SELECT * FROM items WHERE first_seen > ? AND announced = 0
-               ORDER BY (npm IS NULL), stars DESC, first_seen DESC""",
+            f"""SELECT * FROM items WHERE {kind_sql} AND first_seen > ? AND announced = 0
+               ORDER BY {popularity}""",
             (last_digest,),
         ).fetchall()
 
     grown = conn.execute(
-        """SELECT * FROM items WHERE announced = 1 AND stars_prev IS NOT NULL AND stars - stars_prev >= ?
-           ORDER BY (stars - stars_prev) DESC LIMIT 15""",
+        f"""SELECT * FROM items WHERE {kind_sql} AND announced = 1 AND stars_prev IS NOT NULL
+           AND stars - stars_prev >= ? ORDER BY (stars - stars_prev) DESC LIMIT 15""",
         (int(filters.get("star_jump", 10)),),
     ).fetchall()
 
     versioned = conn.execute(
-        """SELECT * FROM items WHERE announced = 1 AND prev_version IS NOT NULL AND version != ''
-           AND prev_version != '' AND version != prev_version
+        f"""SELECT * FROM items WHERE {kind_sql} AND announced = 1 AND prev_version IS NOT NULL
+           AND version != '' AND prev_version != '' AND version != prev_version
            ORDER BY published DESC LIMIT 20"""
     ).fetchall()
 
     listed = [] if demo else conn.execute(
-        """SELECT * FROM items WHERE announced = 1
+        f"""SELECT * FROM items WHERE {kind_sql} AND announced = 1
            AND (sources LIKE '%ecosystem%' OR sources LIKE '%awesome%')
            ORDER BY last_seen DESC LIMIT 10"""
     ).fetchall()
 
     fresh = [r for r in fresh if (r["stars"] or 0) >= min_stars or r["npm"]]
-    max_new = int(cfg.get("filters", {}).get("max_new", 40))
+    max_new = int(filters.get("max_new", 40))
     shown = fresh[:max_new]
 
-    title = cfg.get("digest_title", "🆕 OpenCode Watcher")
+    title = scfg.get("digest_title") or cfg.get("digest_title", "🆕 OpenCode Watcher")
     stamp = now_utc().astimezone().strftime("%d.%m.%Y")
+    empty_word = "MCP-серверов" if is_mcp else "плагинов"
 
     if not fresh and not grown and not versioned:
         return "\n".join(
             [
                 f"<b>{title} — {esc(stamp)}</b>",
-                "\n<i>За прошлый период новых плагинов и обновлений не найдено.</i>",
+                f"\n<i>За прошлый период новых {empty_word} и обновлений не найдено.</i>",
             ]
         ), []
 
@@ -998,7 +1054,8 @@ def build_digest(
 
     if fresh:
         hidden = len(fresh) - len(shown)
-        html_out.append(f"\n<b>🆕 Новое ({len(fresh)})</b>")
+        fresh_header = "🔌 Новые MCP-серверы" if is_mcp else "🆕 Новое"
+        html_out.append(f"\n<b>{fresh_header} ({len(fresh)})</b>")
         for row in shown:
             html_out.append(render(row))
             keys.append(row["key"])
@@ -1023,10 +1080,13 @@ def build_digest(
             src = "ecosystem" if "ecosystem" in (row["sources"] or "") else "awesome"
             html_out.append(render(row, src))
 
-    plugins = [r["npm"] for r in fresh if r["npm"]]
-    if plugins:
-        snippet = ", ".join(f'"{p}"' for p in plugins[:10])
-        html_out.append(f"\n<b>⚙️ Установка в opencode.json</b>\n<pre>{esc(snippet)}</pre>")
+    # сниппет установки даём только для плагинов: у MCP-конфиг другой
+    # (нужен type/url, а не просто имя пакета), выдумывать его не будем
+    if not is_mcp:
+        plugins = [r["npm"] for r in fresh if r["npm"]]
+        if plugins:
+            snippet = ", ".join(f'"{p}"' for p in plugins[:10])
+            html_out.append(f"\n<b>⚙️ Установка в opencode.json</b>\n<pre>{esc(snippet)}</pre>")
 
     parts.extend(html_out)
     return "\n".join(parts), keys
@@ -1089,32 +1149,64 @@ def send_telegram(token: str, chat_id: str, text: str, dry_run: bool = False) ->
 # --------------------------------------------------------------------------- #
 # команды
 # --------------------------------------------------------------------------- #
-def collect(cfg: dict, conn: sqlite3.Connection) -> tuple[int, int, int]:
-    filters = cfg.get("filters", {})
-    window = int(filters.get("github_window_days", 30))
-    since = now_utc() - timedelta(days=window)
+def collect_one(cfg: dict, conn: sqlite3.Connection, jobs: list[tuple[str, object]]) -> tuple[list[dict], int]:
+    """Выполняет список (имя источника, функция) и возвращает (сырые записи, ошибок)."""
     raw: list[dict] = []
     errors = 0
-    for name, func in (
-        ("github", lambda: source_github(cfg, since)),
-        ("npm", lambda: source_npm(cfg)),
-        ("ecosystem", source_ecosystem),
-        ("awesome", source_awesome),
-    ):
+    for name, func in jobs:
         if not cfg.get("sources", {}).get(name, True):
             continue
         try:
-            found = func()
-            if not found:
-                log(f"  ⚠️  {name}: 0 кандидатов — источник мог отдать пустую выдачу, проверь лог")
-            else:
-                log(f"  {name}: {len(found)} кандидатов")
-            raw.extend(found)
+            found = func()  # type: ignore[operator]
         except Exception as exc:  # noqa: BLE001
             errors += 1
             log(f"  ! источник {name} упал: {exc}")
-    items = merge_items(raw)
-    new_count, update_count = store_items(conn, items)
+            continue
+        if not found:
+            log(f"  ⚠️  {name}: 0 кандидатов — источник мог отдать пустую выдачу, проверь лог")
+        else:
+            log(f"  {name}: {len(found)} кандидатов")
+        raw.extend(found)
+    return raw, errors
+
+
+def collect(cfg: dict, conn: sqlite3.Connection) -> tuple[int, int, int]:
+    """Сканирует все источники: плагины, затем MCP-серверы.
+
+    MCP лежат в той же таблице items, но с kind='mcp', поэтому два дайджеста
+    не пересекаются. Курируемые списки (ecosystem, awesome) — только плагинам:
+    секций MCP там нет.
+    """
+    since = now_utc() - timedelta(days=int(cfg.get("github_window_days", 30)))
+
+    raw, errors = collect_one(
+        cfg,
+        conn,
+        [
+            ("github", lambda: source_github(cfg, since, "plugin")),
+            ("npm", lambda: source_npm(cfg, "plugin")),
+            ("ecosystem", source_ecosystem),
+            ("awesome", source_awesome),
+        ],
+    )
+
+    mcp_enabled = bool(cfg.get("mcp", {}).get("enabled", True))
+    if mcp_enabled:
+        log("MCP-серверы:")
+        mcp_raw, mcp_errors = collect_one(
+            cfg,
+            conn,
+            [
+                ("github", lambda: source_github(cfg, since, "mcp")),
+                ("npm", lambda: source_npm(cfg, "mcp")),
+            ],
+        )
+        raw.extend(mcp_raw)
+        errors += mcp_errors
+    else:
+        log("MCP-серверы: выключено в конфиге (mcp.enabled=false)")
+
+    new_count, update_count = store_items(conn, merge_items(raw))
     return new_count, update_count, errors
 
 
@@ -1137,38 +1229,62 @@ def cmd_run(args: argparse.Namespace) -> int:
         log("Сканирование…")
         if args.demo:
             new_count, update_count, errors = 0, 0, 0
-            log("DEMO: источники не опрашиваются, дайджест строится по базе")
+            log("DEMO: источники не опрашиваются, дайджесты строятся по базе")
         else:
             new_count, update_count, errors = collect(cfg, conn)
             log(f"Новых: {new_count}, обновлений: {update_count}, ошибок источников: {errors}")
 
-        text, keys = build_digest(conn, cfg, demo=args.demo, do_translate=not args.no_translate)
-        print("\n" + "=" * 60)
-        print(html.unescape(re.sub(r"<[^>]+>", "", text)))
-        print("=" * 60 + "\n")
+        # Одна команда — два сообщения: сначала плагины, потом MCP.
+        # Пустые дайджесты не отправляем, чтобы не спамить «ничего не найдено».
+        sections = [("plugins", "🆕 Плагины")]
+        if cfg.get("mcp", {}).get("enabled", True):
+            sections.append(("mcp", "🔌 MCP"))
 
         os.makedirs(OUTBOX_DIR, exist_ok=True)
-        fname = now_utc().astimezone().strftime("%Y-%m-%d_%H%M")
-        with open(os.path.join(OUTBOX_DIR, f"{fname}.md"), "w", encoding="utf-8") as fh:
-            fh.write(html_to_md(text))
-
+        all_keys: list[str] = []
         sent = 0
-        if not args.dry_run:
+        written: list[str] = []
+        empty: list[str] = []
+
+        for section, label in sections:
+            text, keys = build_digest(
+                conn, cfg, demo=args.demo, do_translate=not args.no_translate, section=section
+            )
+            all_keys.extend(keys)
+            plain = html.unescape(re.sub(r"<[^>]+>", "", text))
+            is_empty = "не найдено" in text
+            if is_empty and not args.demo:
+                empty.append(label)
+                log(f"{label}: изменений нет — сообщение не отправляю")
+                continue
+            print("\n" + "=" * 60)
+            print(plain)
+            print("=" * 60 + "\n")
+
+            fname = now_utc().astimezone().strftime("%Y-%m-%d_%H%M")
+            fname = f"{fname}_{section}"
+            written.append(f"outbox/{fname}.md")
+            with open(os.path.join(OUTBOX_DIR, f"{fname}.md"), "w", encoding="utf-8") as fh:
+                fh.write(html_to_md(text))
+
+            if args.dry_run:
+                log(f"{label}: DRY-RUN — отправка пропущена, отметки в базе не тронуты")
+                continue
             if not (token and chat_id):
-                log("! Нет TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID — дайджест сохранён, но не отправлен.")
-            else:
-                send_telegram(token, chat_id, text)
-                sent = 1
-                log("Отправлено в Telegram.")
-            if not args.demo:
-                meta_set(conn, "last_digest_at", iso(now_utc()))
-                if keys:
-                    conn.execute(
-                        "UPDATE items SET announced=1 WHERE key IN (%s)" % ",".join("?" * len(keys)), keys
-                    )
-                conn.commit()
-        else:
-            log("DRY-RUN: отправка пропущена, отметки в базе не тронуты.")
+                log(f"! Нет TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID — {label} сохранён, но не отправлен.")
+                continue
+            send_telegram(token, chat_id, text)
+            sent += 1
+            log(f"{label}: отправлено в Telegram.")
+
+        if not args.dry_run and not args.demo:
+            meta_set(conn, "last_digest_at", iso(now_utc()))
+            if all_keys:
+                conn.execute(
+                    "UPDATE items SET announced=1 WHERE key IN (%s)" % ",".join("?" * len(all_keys)),
+                    all_keys,
+                )
+            conn.commit()
 
         if not args.demo:
             conn.execute(
@@ -1176,7 +1292,10 @@ def cmd_run(args: argparse.Namespace) -> int:
                 (started, iso(now_utc()), new_count, update_count, errors, sent),
             )
             conn.commit()
-        log(f"Готово. Копия дайджеста: outbox/{fname}.md")
+        if written:
+            log("Готово. Копии дайджестов: " + ", ".join(written))
+        if empty:
+            log("Без изменений: " + ", ".join(empty))
         return 0
 
 

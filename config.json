@@ -24,7 +24,11 @@
     "enabled": true,
     "lang": "ru",
     "max_chars": 150,
-    "providers": ["pollinations", "mymemory", "google"],
+    "providers": [
+      "pollinations",
+      "mymemory",
+      "google"
+    ],
     "model": "openai/gpt-5.4-nano",
     "endpoint": "https://gen.pollinations.ai/v1/chat/completions",
     "batch": 12,
@@ -37,5 +41,26 @@
     "npm": true,
     "ecosystem": true,
     "awesome": true
+  },
+  "mcp": {
+    "enabled": true,
+    "digest_title": "🔌 OpenCode MCP",
+    "github_queries": [
+      "opencode-mcp in:name pushed:>={since}",
+      "topic:opencode-mcp pushed:>={since}",
+      "opencode mcp server in:name,description created:>={since}"
+    ],
+    "npm_queries": [
+      "opencode-mcp",
+      "keywords:opencode-mcp",
+      "opencode mcp server"
+    ],
+    "filters": {
+      "min_stars": 0,
+      "star_jump": 5,
+      "window_days": 8,
+      "npm_max_age_days": 90,
+      "max_new": 30
+    }
   }
 }

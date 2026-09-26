@@ -8,6 +8,7 @@
 «перевод реально состоялся».
 """
 
+import json
 import os
 import sys
 import tempfile
@@ -244,6 +245,146 @@ class TestDatabase(unittest.TestCase):
         self.conn.commit()
         got = self.conn.execute("SELECT text FROM translations WHERE k=?", (key,)).fetchone()
         self.assertEqual(got[0], "Плагин OpenCode")
+
+
+class TestMcpRelevance(unittest.TestCase):
+    """Правила отбора MCP-серверов под OpenCode: точность важнее полноты."""
+
+    def test_key_regex_accepts_slugs(self):
+        for text in ("owner/opencode-mcp", "opencode_mcp_manager", "mcp-opencode", "opencode.mcp"):
+            self.assertTrue(w.MCP_KEY_RE.search(text), text)
+
+    def test_key_regex_rejects_plain_opencode(self):
+        for text in ("owner/opencode-plugin", "opencode-sdk-dotnet", "claude-code"):
+            self.assertFalse(w.MCP_KEY_RE.search(text), text)
+
+    def test_desc_regex_accepts_purpose_phrases(self):
+        for text in (
+            "MCP server for OpenCode AI — 70 tools",
+            "An OpenCode MCP server for the browser",
+            "Zero-dependency MCP server to drive opencode",
+            "MCP para OpenCode",
+        ):
+            self.assertTrue(w.MCP_DESC_RE.search(text), text)
+
+    def test_desc_regex_rejects_incidental_mentions(self):
+        # «поддерживает OpenCode среди других клиентов» — не наш сервер
+        for text in (
+            "Unofficial typed .NET SDK for the opencode HTTP API (preview) with MCP support",
+            "Run Claude Code, Codex, Cursor and OpenCode from one tmux workspace",
+        ):
+            self.assertFalse(w.MCP_DESC_RE.search(text), text)
+
+
+class TestSections(unittest.TestCase):
+    """Плагины и MCP — разные дайджесты, оба по популярности."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.conn = w.db_connect(os.path.join(self.tmp.name, "t.db"))
+        self.cfg = {
+            "digest_title": "🆕 Плагины",
+            "filters": {"min_stars": 0, "max_new": 40, "window_days": 8, "star_jump": 10},
+            "mcp": {
+                "enabled": True,
+                "digest_title": "🔌 MCP",
+                "filters": {"min_stars": 0, "max_new": 40, "window_days": 8, "star_jump": 10},
+            },
+            "translate": {"enabled": False},
+        }
+        rows = [
+            {"key": "gh:a/plugin-low", "title": "plugin-low", "kind": "plugin", "repo": "a/plugin-low",
+             "stars": 5, "description": "low stars plugin", "sources": "github"},
+            {"key": "gh:a/plugin-top", "title": "plugin-top", "kind": "plugin", "repo": "a/plugin-top",
+             "stars": 500, "description": "top plugin", "sources": "github"},
+            {"key": "gh:a/mcp-huge", "title": "mcp-huge", "kind": "mcp", "repo": "a/mcp-huge",
+             "stars": 9999, "description": "huge mcp", "sources": "github:mcp"},
+            {"key": "gh:a/mcp-small", "title": "mcp-small", "kind": "mcp", "repo": "a/mcp-small",
+             "stars": 1, "description": "small mcp", "sources": "github:mcp"},
+            # старая запись без явного kind — должна считаться плагином
+            {"key": "gh:a/legacy", "title": "legacy", "repo": "a/legacy", "kind": None,
+             "stars": 42, "description": "legacy row", "sources": "github"},
+        ]
+        w.store_items(self.conn, rows)
+        for row in self.conn.execute("SELECT key FROM items").fetchall():
+            self.conn.execute("UPDATE items SET announced=0 WHERE key=?", (row[0],))
+        self.conn.execute("UPDATE meta SET v=? WHERE k='last_digest_at'", ("2000-01-01T00:00:00+00:00",))
+        self.conn.commit()
+
+    def tearDown(self):
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def test_plugin_digest_excludes_mcp(self):
+        text, keys = w.build_digest(self.conn, self.cfg, do_translate=False, section="plugins")
+        self.assertNotIn("mcp-huge", text)
+        self.assertNotIn("mcp-small", text)
+        self.assertEqual(set(keys), {"gh:a/plugin-low", "gh:a/plugin-top", "gh:a/legacy"})
+
+    def test_mcp_digest_excludes_plugins(self):
+        text, keys = w.build_digest(self.conn, self.cfg, do_translate=False, section="mcp")
+        self.assertNotIn("plugin-top", text)
+        self.assertEqual(set(keys), {"gh:a/mcp-huge", "gh:a/mcp-small"})
+
+    def test_sections_do_not_share_keys(self):
+        _, pkeys = w.build_digest(self.conn, self.cfg, do_translate=False, section="plugins")
+        _, mkeys = w.build_digest(self.conn, self.cfg, do_translate=False, section="mcp")
+        self.assertEqual(set(pkeys) & set(mkeys), set())
+
+    def test_sorted_by_popularity(self):
+        text, _ = w.build_digest(self.conn, self.cfg, do_translate=False, section="plugins")
+        # по популярности: 500 → 42 → 5
+        order = [text.index("plugin-top"), text.index("legacy"), text.index("plugin-low")]
+        self.assertEqual(order, sorted(order), "плагины должны идти по звёздам: 500 → 42 → 5")
+
+        mtext, _ = w.build_digest(self.conn, self.cfg, do_translate=False, section="mcp")
+        self.assertLess(mtext.index("mcp-huge"), mtext.index("mcp-small"))
+
+    def test_legacy_row_without_kind_goes_to_plugin_digest(self):
+        _, pkeys = w.build_digest(self.conn, self.cfg, do_translate=False, section="plugins")
+        self.assertIn("gh:a/legacy", pkeys)
+
+    def test_titles_use_own_digest_title(self):
+        ptext, _ = w.build_digest(self.conn, self.cfg, do_translate=False, section="plugins")
+        mtext, _ = w.build_digest(self.conn, self.cfg, do_translate=False, section="mcp")
+        self.assertIn("🆕 Плагины", ptext)
+        self.assertIn("🔌 MCP", mtext)
+
+    def test_mcp_has_no_npm_snippet(self):
+        # «⚙️ Установка в opencode.json» с именами пакетов для MCP бессмысленно
+        _, mkeys = w.build_digest(self.conn, self.cfg, do_translate=False, section="mcp")
+        self.assertTrue(mkeys)
+        npm_row = {
+            "key": "npm:opencode-mcp", "title": "opencode-mcp", "kind": "mcp", "npm": "opencode-mcp",
+            "stars": 0, "version": "1.0.0", "description": "MCP server for OpenCode", "sources": "npm:mcp",
+        }
+        w.store_items(self.conn, [npm_row])
+        self.conn.execute("UPDATE items SET announced=0 WHERE key='npm:opencode-mcp'")
+        self.conn.commit()
+        mtext, _ = w.build_digest(self.conn, self.cfg, do_translate=False, section="mcp")
+        self.assertNotIn("Установка в opencode.json", mtext)
+
+    def test_empty_section_says_nothing_found(self):
+        empty_cfg = json.loads(json.dumps(self.cfg))
+        for section in ("plugins", "mcp"):
+            self.conn.execute("UPDATE items SET announced=1")
+            self.conn.commit()
+            text, keys = w.build_digest(self.conn, empty_cfg, do_translate=False, section=section)
+            self.assertEqual(keys, [])
+            self.assertIn("не найдено", text)
+
+
+class TestMergeDoesNotMixKinds(unittest.TestCase):
+    def test_mcp_and_plugin_with_same_name_stay_separate(self):
+        plugin = {"key": "npm:shared", "title": "shared", "npm": "shared", "kind": "plugin", "repo": "o/shared"}
+        mcp = {"key": "gh:o/shared-mcp", "title": "shared-mcp", "repo": "o/shared-mcp", "kind": "mcp"}
+        merged = w.merge_items([plugin, mcp])
+        self.assertEqual(len(merged), 2, "плагин и MCP не должны склеиваться")
+
+    def test_same_kind_still_merges(self):
+        plugin = {"key": "npm:tool", "title": "tool", "npm": "tool", "kind": "plugin", "repo": "o/tool"}
+        repo = {"key": "gh:o/tool", "title": "tool", "repo": "o/tool", "kind": "plugin"}
+        self.assertEqual(len(w.merge_items([plugin, repo])), 1)
 
 
 if __name__ == "__main__":
